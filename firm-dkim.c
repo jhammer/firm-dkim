@@ -26,10 +26,10 @@ THE SOFTWARE.
 #include <unistd.h>
 #include <string.h>
 #include <time.h>
-
+#include <ctype.h>
 #include "firm-dkim.h"
-	
-stringpair **relaxed_header_canon(stringpair **headers, int headerc);
+
+stringpair **relaxed_header_canon(dkim_context_t *context, stringpair **headers, int *headerc);
 char *relaxed_body_canon(char *body);
 char *relaxed_body_canon_line(char *line);	
 
@@ -40,60 +40,109 @@ char *wrap(char *str, int len);
 int rsa_read_pem(RSA **rsa, char *buff, int len);
 char *base64_encode(const unsigned char *input, int length);
 
+typedef struct dkim_context_t {
+    char *domain;
+    char *selector;
+    char *identity;
+    RSA *rsa_private;
+    char *skip_list;
+} dkim_context_t;
+
+dkim_context_t *dkim_context_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len) {
+    dkim_context_t *context = calloc(sizeof(dkim_context_t), 1);
+    
+    context->domain = malloc(strlen(domain) + 1);
+    strcpy(context->domain, domain);
+    
+    context->selector = malloc(strlen(selector) + 1);
+    strcpy(context->selector, selector);
+    
+    if (identity) {
+        context->identity = malloc(strlen(identity) + 1);
+        strcpy(context->identity, identity);
+    }
+    
+    if (rsa_read_pem(&(context->rsa_private), pkey_buf, pkey_len) == -1) {
+        printf (" * ERROR loading rsa key\n");
+        dkim_context_free(context);
+        return NULL;
+    }
+    
+    /* see http://dkim.org/specs/rfc4871-dkimbase.html#choosing-header-fields */
+    char *default_skip_list = "return-path received comments keywords bcc resent-bcc dkim-signature";
+    context->skip_list = malloc(strlen(default_skip_list) + 1);
+    strcpy(context->skip_list, default_skip_list);
+
+    return context;
+}
+
+void dkim_context_free(dkim_context_t *context) {
+    free(context->domain);
+    free(context->selector);
+    free(context->identity);
+    RSA_free(context->rsa_private);
+    free(context->skip_list);
+    free(context);
+}
 
 /* create a DKIM-signature header value
    http://tools.ietf.org/html/rfc4871 */
-char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, char *domain, char *selector, int v) {
+char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, char *body, int v) {
 	int i = 0;
-	RSA *rsa_private = NULL;
-
-	/* load the private key */
-	if (v) printf (" * Loading rsa key...\n");
-	if (rsa_read_pem(&rsa_private, pkey, strlen(pkey)) == -1) {
-		printf (" * ERROR loading rsa key\n");
-		return NULL;
-	}
-
+    
 	/* relax canonicalization for headers */
 	if (v) printf (" * 'Relaxing' headers...\n");
-	stringpair **new_headers = relaxed_header_canon(headers, headerc);
+	stringpair **new_headers = relaxed_header_canon(context, headers, &headerc);
 	
 	/* relax canonicalization for body */
 	if (v) printf (" * 'Relaxing' body...\n");
 	char *new_body = relaxed_body_canon(body);
-	int new_body_len = strlen(new_body);
+	size_t new_body_len = strlen(new_body);
 
 	/* signature timestamp */
 	time_t ts = time(NULL);
 
 	/* hash of the canonicalized body */
 	if (v) printf (" * Hashing 'relaxed' body...\n");
-	unsigned char *uhash = malloc(SHA_DIGEST_LENGTH);
-	SHA1 ((unsigned char*)new_body, new_body_len, uhash);
+	unsigned char *uhash = malloc(SHA256_DIGEST_LENGTH);
+	SHA256 ((unsigned char*)new_body, new_body_len, uhash);
 	
 	/* base64 encode the hash */
-	char *bh = base64_encode(uhash, SHA_DIGEST_LENGTH);
+	char *bh = base64_encode(uhash, SHA256_DIGEST_LENGTH);
 	free (uhash);
 	
 	/* create header list */
 	if (v) printf (" * Creating header list...\n");
-	char *header_list = malloc(headerc*200);
-	int header_list_len = 0;
+    int header_list_len = headerc - 1;
+    for (i = 0; i < headerc; ++i) {
+        header_list_len += strlen(new_headers[i]->key);
+    }
+    
+    char *header_list = calloc(header_list_len + 1, sizeof(char));
+    int header_list_start = 0;
 	for (i = 0; i < headerc; ++i) {
-		if (header_list_len != 0) {
-			header_list_len += sprintf(header_list + header_list_len, ":");
+		if (header_list_start) {
+            header_list_start += sprintf(header_list + header_list_start, ":");
 		}
 	
-		header_list_len += sprintf(header_list + header_list_len, "%s", new_headers[i]->key);
+        header_list_start += sprintf(header_list + header_list_start, "%s", new_headers[i]->key);
 	}
-	
+    
 	/* create DKIM header */
 	if (v) printf (" * Creating a DKIM header...\n");
-	char *dkim_string = "v=1; a=rsa-sha1; s=%s; d=%s; l=%d; t=%d; c=relaxed/relaxed; h=%s; bh=%s; b=";
-	char *dkim = malloc(strlen(dkim_string)+strlen(selector)+strlen(domain)+16+16+strlen(header_list)+strlen(bh)+1);
-	int dkim_len = sprintf(dkim, dkim_string,
-		selector, domain, new_body_len, ts, header_list, bh
-	);
+    char *dkim;
+    int dkim_len;
+    
+    if (context->identity) {
+        dkim_len = asprintf(&dkim, "v=1; a=rsa-sha256; s=%s; d=%s; t=%ld; i=%s; c=relaxed/relaxed; h=%s; bh=%s; b=",
+            context->selector, context->domain, ts, context->identity, header_list, bh
+        );
+    }
+    else {
+        dkim_len = asprintf(&dkim, "v=1; a=rsa-sha256; s=%s; d=%s; t=%ld; c=relaxed/relaxed; h=%s; bh=%s; b=",
+            context->selector, context->domain, ts, header_list, bh
+        );
+    }
 	
 	/* free some memory */
 	if (v) printf (" * Freeing some memory...\n");
@@ -110,45 +159,55 @@ char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, cha
 	
 	/* make a string of all headers */
 	if (v) printf (" * Making a string of all headers...\n");
-	char *header_str = malloc(1500*headerc);
-	int header_str_len = 0;
+    int header_str_len = 0;
+    for (i = 0; i < headerc; ++i) {
+        header_str_len += strlen(new_headers[i]->key);
+        header_str_len += 1;
+        header_str_len += strlen(new_headers[i]->value);
+        
+        if (i < headerc-1) {
+            header_str_len += 2;
+        }
+    }
+    
+    char *header_str = calloc(header_str_len + 1, sizeof(char));
+	int header_str_start = 0;
 	
 	for (i = 0; i < headerc; ++i) {
-		int key_len = strlen(new_headers[i]->key);
-		int value_len = strlen(new_headers[i]->value);
+		size_t key_len = strlen(new_headers[i]->key);
+        size_t value_len = strlen(new_headers[i]->value);
 	
-		memcpy (header_str+header_str_len, new_headers[i]->key, key_len);
-		header_str_len += key_len;
+		memcpy (header_str+header_str_start, new_headers[i]->key, key_len);
+		header_str_start += key_len;
 		
-		memcpy (header_str+header_str_len, ":", 1);
-		header_str_len++;
+		memcpy (header_str+header_str_start, ":", 1);
+		header_str_start++;
 		
-		memcpy (header_str+header_str_len, new_headers[i]->value, value_len);
-		header_str_len += value_len;
+		memcpy (header_str+header_str_start, new_headers[i]->value, value_len);
+		header_str_start += value_len;
 		
 		if (i < headerc-1) {
-			memcpy (header_str+header_str_len, "\r\n", 3);
-			header_str_len += 2;
+			memcpy (header_str+header_str_start, "\r\n", 2);
+			header_str_start += 2;
 		}
 	}
 	
 	/* hash the headers */
 	if (v) printf (" * Hashing headers...\n");
-	unsigned char *hash = malloc(SHA_DIGEST_LENGTH);
-	SHA1 ((unsigned char*)header_str, header_str_len, hash);
+	unsigned char *hash = malloc(SHA256_DIGEST_LENGTH);
+	SHA256 ((unsigned char*)header_str, header_str_start, hash);
 	
 	/* sign canon headers with private key */
 	if (v) printf (" * Signing the header hash with the rsa key...\n");
-	unsigned char *sig = malloc(RSA_size(rsa_private));
+	unsigned char *sig = malloc(RSA_size(context->rsa_private));
 	unsigned int sig_len;
 	
-	if (RSA_sign(NID_sha1, hash, SHA_DIGEST_LENGTH, sig, &sig_len, rsa_private) == 0) {
+	if (RSA_sign(NID_sha256, hash, SHA256_DIGEST_LENGTH, sig, &sig_len, context->rsa_private) == 0) {
 		printf (" * ERROR RSA_sign(): %s\n", ERR_error_string(ERR_get_error(), NULL));
 		free (hash);
 		free (new_headers);
 		free (header_str);
 		free (sig);
-		RSA_free (rsa_private);
 		return NULL;
 	}
 	
@@ -157,7 +216,7 @@ char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, cha
 	/* base64 encode the signature */
 	if (v) printf (" * Base64 encoding the signature...\n");
 	char *sig_b64 = base64_encode(sig, sig_len);
-	int sig_b64_len = strlen(sig_b64);
+    size_t sig_b64_len = strlen(sig_b64);
 	
 	/* add it to the dkim header */
 	if (v) printf (" * Adding the signature to the dkim header...\n");
@@ -165,9 +224,14 @@ char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, cha
 	memcpy (dkim + dkim_len, sig_b64, sig_b64_len + 1);
 	dkim_len += sig_b64_len;
 	
+    /* format header name */
+    char *formatted_dkim;
+    int formatted_dkim_len = asprintf(&formatted_dkim, "DKIM-Signature: %s", dkim);
+    free (dkim);
+    
 	/* wrap dkim header */
 	if (v) printf (" * Wrapping the header...\n");
-	dkim = wrap(dkim, dkim_len);
+    formatted_dkim = wrap(formatted_dkim, formatted_dkim_len);
 	
 	/* free some more memory */
 	if (v) printf (" * Freeing some more memory...\n");
@@ -180,27 +244,24 @@ char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, cha
 	free (header_str);
 	free (sig);
 	free (sig_b64);
-	
-	/* free the private key */
-	if (v) printf (" * Freeing the rsa key...\n");
-	RSA_free (rsa_private);
-	
+		
 	/* return the dkim header value */
 	if (v) printf (" * Done, returning...\n");
-	return dkim;
+	return formatted_dkim;
 }
 
 /* The "relaxed" Header Canonicalization Algorithm */
-stringpair **relaxed_header_canon(stringpair **headers, int headerc) {
+stringpair **relaxed_header_canon(dkim_context_t *context, stringpair **headers, int *headerc) {
 	int i = 0;
-	int e = 0;
+    size_t e = 0;
 	
 	/* Copy all headers */
-	stringpair **new_headers = (stringpair**)malloc(sizeof(stringpair*) * (headerc + 1));   
+    int new_headerc = *headerc;
+	stringpair **new_headers = (stringpair**)malloc(sizeof(stringpair*) * (new_headerc + 1));
 	   
-	for (i = 0; i < headerc; ++i) {
-		int key_len = strlen(headers[i]->key);
-		int val_len = strlen(headers[i]->value);
+	for (i = 0; i < new_headerc; ++i) {
+        size_t key_len = strlen(headers[i]->key);
+        size_t val_len = strlen(headers[i]->value);
 		
 		new_headers[i] = (stringpair*)malloc(sizeof(stringpair));
 		new_headers[i]->key = malloc(key_len+1);
@@ -212,21 +273,61 @@ stringpair **relaxed_header_canon(stringpair **headers, int headerc) {
 
 	/* Convert all header field names (not the header field values) to
 	   lowercase.  For example, convert "SUBJect: AbC" to "subject: AbC". */
-	for (i = 0; i < headerc; ++i) {
-		int key_len = strlen(new_headers[i]->key);
+	for (i = 0; i < new_headerc; ++i) {
+        size_t key_len = strlen(new_headers[i]->key);
 
 		for (e = 0; e < key_len; ++e) {
 			new_headers[i]->key[e] = tolower(new_headers[i]->key[e]);
 		}
 	}
 	
+    /* Remove headers in our skip list */
+    char *brk;
+    char *token = strtok_r(context->skip_list, " ", &brk);
+    
+    while (token) {
+        for (i = 0; i < new_headerc; ++i) {
+            if (strcmp(token, new_headers[i]->key) == 0) {
+                new_headers[i]->key[0] = '\0';
+            }
+        }
+        
+        token = strtok_r(NULL, " ", &brk);
+    }
+    
+    /* Remove all but last instance of duplicate headers */
+    for (i = 0; i < new_headerc; ++i) {
+        int j;
+        
+        for (j = i+1; j < new_headerc; ++j) {
+            if (strcmp(new_headers[i]->key, new_headers[j]->key) == 0) {
+                new_headers[i]->key[0] = '\0';
+                break;
+            }
+        }
+    }
+    
+    /* If key length has been set to zero by either of the
+       two checks above, remove the header. */
+    int j = 0;
+    
+    for (i = 0; i < new_headerc; ++i) {
+        if (strlen(new_headers[i]->key) == 0) {
+            continue;
+        }
+        
+        new_headers[j++] = new_headers[i];
+    }
+    
+    new_headerc = j;
+    
 	/* Unfold all header field continuation lines as described in
 	   [RFC2822]; in particular, lines with terminators embedded in
 	   continued header field values (that is, CRLF sequences followed by
 	   WSP) MUST be interpreted without the CRLF.  Implementations MUST
 	   NOT remove the CRLF at the end of the header field value. */
-	for (i = 0; i < headerc; ++i) {
-		int val_len = strlen(new_headers[i]->value);
+	for (i = 0; i < new_headerc; ++i) {
+        size_t val_len = strlen(new_headers[i]->value);
 		int new_len = 0;
 
 		for (e = 0; e < val_len; ++e) {
@@ -247,8 +348,8 @@ stringpair **relaxed_header_canon(stringpair **headers, int headerc) {
 	/* Convert all sequences of one or more WSP characters to a single SP
 	   character.  WSP characters here include those before and after a
 	   line folding boundary. */
-	for (i = 0; i < headerc; ++i) {
-		int val_len = strlen(new_headers[i]->value);
+	for (i = 0; i < new_headerc; ++i) {
+        size_t val_len = strlen(new_headers[i]->value);
 		int new_len = 0;
 
 		for (e = 0; e < val_len; ++e) {
@@ -273,7 +374,7 @@ stringpair **relaxed_header_canon(stringpair **headers, int headerc) {
         /* Delete any WSP characters remaining before and after the colon
 	   separating the header field name from the header field value.  The
 	   colon separator MUST be retained. */
-	for (i = 0; i < headerc; ++i) {
+	for (i = 0; i < new_headerc; ++i) {
 		new_headers[i]->value = rtrim(new_headers[i]->value);
 		new_headers[i]->value = ltrim(new_headers[i]->value);
 	}
@@ -284,12 +385,12 @@ stringpair **relaxed_header_canon(stringpair **headers, int headerc) {
 
 /* The "relaxed" Body Canonicalization Algorithm */
 char *relaxed_body_canon(char *body) {
-	int i = 0;
-	int offset = 0;
-	int body_len = strlen(body);
+    size_t i = 0;
+    size_t offset = 0;
+    size_t body_len = strlen(body);
 	
 	char *new_body = malloc(body_len*2+3);
-	int new_body_len = 0;
+    size_t new_body_len = 0;
 
 	for (i = 0; i < body_len; ++i) {
 		int is_r = 0;
@@ -308,7 +409,7 @@ char *relaxed_body_canon(char *body) {
 		
 			relaxed_body_canon_line (line);
 
-			int line_len = strlen(line);
+            size_t line_len = strlen(line);
 			memcpy (new_body+new_body_len, line, line_len);
 			memcpy (new_body+new_body_len+line_len, "\r\n", 2);
 			new_body_len += line_len+2;
@@ -329,7 +430,7 @@ char *relaxed_body_canon(char *body) {
 	
 		relaxed_body_canon_line (line);
 				
-		int line_len = strlen(line);
+        size_t line_len = strlen(line);
 		memcpy (new_body+new_body_len, line, line_len);
 		memcpy (new_body+new_body_len+line_len, "\r\n", 2);
 		new_body_len += line_len+2;
@@ -356,8 +457,8 @@ char *relaxed_body_canon(char *body) {
 
 /* The "relaxed" Body Canonicalization Algorithm, per line */
 char *relaxed_body_canon_line(char *line) {
-	int line_len = 0;
-	int i;
+    size_t line_len = 0;
+    size_t i;
 	
 	/* Ignores all whitespace at the end of lines.  Implementations MUST
       	   NOT remove the CRLF at the end of the line. */
@@ -391,7 +492,7 @@ char *relaxed_body_canon_line(char *line) {
 /* rtrim function for lines */
 char *rtrim_lines(char *str) {
 	char *end;
-	int len = strlen(str);
+    size_t len = strlen(str);
 
 	while (*str && len) {
 		end = str + len-1;
@@ -412,7 +513,7 @@ char *rtrim_lines(char *str) {
 /* rtrim function */
 char *rtrim(char *str) {
 	char *end;
-	int len = strlen(str);
+    size_t len = strlen(str);
 
 	while (*str && len) {
 		end = str + len-1;
@@ -433,7 +534,7 @@ char *rtrim(char *str) {
 /* ltrim function */
 char *ltrim(char *str) {
 	char *start = str;
-	int len = strlen(str);
+    size_t len = strlen(str);
 
 	while (*start && len) {		
 		if (*start == ' ' || *start == '\t') {
@@ -522,8 +623,8 @@ char *base64_encode(const unsigned char *input, int length) {
 	BIO_free_all (b64);
 
 	/* remove line breaks */
-	int buff_len = strlen(buff);
-	int i, cur = 0;
+    size_t buff_len = strlen(buff);
+    size_t i, cur = 0;
 	for (i = 0; i < buff_len; ++i) {
 		if (buff[i] != '\r' && buff[i] != '\n') {
 			buff[cur++] = buff[i];

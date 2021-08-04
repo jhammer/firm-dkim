@@ -42,6 +42,11 @@ typedef struct {
 	char *value;
 } stringpair;
 
-char *dkim_create(stringpair **headers, int headerc, char *body, char *pkey, char *domain, char *selector, int v);
+typedef struct dkim_context_t dkim_context_t;
+
+dkim_context_t *dkim_context_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len);
+void dkim_context_free(dkim_context_t *context);
+
+char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, char *body, int v);
 
 #endif

@@ -24,7 +24,7 @@ THE SOFTWARE.
 #include <stdio.h>
 #include <string.h>
 
-#include <firm-dkim.h>
+#include "../firm-dkim.h"
 
 
 int main(int argc, char *argv[]) {
@@ -57,10 +57,11 @@ int main(int argc, char *argv[]) {
 	
 	/* body */
 	char *body = "Hi.\r\n\r\nWe lost the game. Are you hungry yet?\r\n\r\nJoe.";
-	
+    
 	/* create signature */
-	char *dkim = dkim_create(headers, headerc, body, private_key, domain, selector, 0);
-	printf ("DKIM-Signature: %s\n", dkim);
+    dkim_context_t *context = dkim_context_create(domain, selector, NULL, private_key, strlen(private_key));
+	char *dkim = dkim_create(context, headers, headerc, body, 0);
+	printf ("Header: %s\n", dkim);
 
 	/* free some memory */
 	free (dkim);
@@ -69,6 +70,7 @@ int main(int argc, char *argv[]) {
 		free (headers[i]);
 	}
 	free (headers);
+    dkim_context_free(context);
 
 	return 0;
 }
