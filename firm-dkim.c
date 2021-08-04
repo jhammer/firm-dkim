@@ -29,7 +29,7 @@ THE SOFTWARE.
 #include <ctype.h>
 #include "firm-dkim.h"
 
-stringpair **relaxed_header_canon(dkim_context_t *context, stringpair **headers, int *headerc);
+stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, int *headerc);
 char *relaxed_body_canon(char *body);
 char *relaxed_body_canon_line(char *line);	
 
@@ -40,59 +40,59 @@ char *wrap(char *str, int len);
 int rsa_read_pem(RSA **rsa, char *buff, int len);
 char *base64_encode(const unsigned char *input, int length);
 
-typedef struct dkim_context_t {
+typedef struct dkim_signer_t {
 	char *domain;
 	char *selector;
 	char *identity;
 	RSA *rsa_private;
 	char *skip_list;
-} dkim_context_t;
+} dkim_signer_t;
 
-dkim_context_t *dkim_context_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len) {
-	dkim_context_t *context = calloc(sizeof(dkim_context_t), 1);
+dkim_signer_t *dkim_signer_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len) {
+	dkim_signer_t *signer = calloc(sizeof(dkim_signer_t), 1);
 	
-	context->domain = malloc(strlen(domain) + 1);
-	strcpy(context->domain, domain);
+	signer->domain = malloc(strlen(domain) + 1);
+	strcpy(signer->domain, domain);
 	
-	context->selector = malloc(strlen(selector) + 1);
-	strcpy(context->selector, selector);
+	signer->selector = malloc(strlen(selector) + 1);
+	strcpy(signer->selector, selector);
 	
 	if (identity) {
-		context->identity = malloc(strlen(identity) + 1);
-		strcpy(context->identity, identity);
+		signer->identity = malloc(strlen(identity) + 1);
+		strcpy(signer->identity, identity);
 	}
 	
-	if (rsa_read_pem(&(context->rsa_private), pkey_buf, pkey_len) == -1) {
+	if (rsa_read_pem(&(signer->rsa_private), pkey_buf, pkey_len) == -1) {
 		printf (" * ERROR loading rsa key\n");
-		dkim_context_free(context);
+		dkim_signer_free(signer);
 		return NULL;
 	}
 	
 	/* see http://dkim.org/specs/rfc4871-dkimbase.html#choosing-header-fields */
 	char *default_skip_list = "return-path received comments keywords bcc resent-bcc dkim-signature";
-	context->skip_list = malloc(strlen(default_skip_list) + 1);
-	strcpy(context->skip_list, default_skip_list);
+	signer->skip_list = malloc(strlen(default_skip_list) + 1);
+	strcpy(signer->skip_list, default_skip_list);
 
-	return context;
+	return signer;
 }
 
-void dkim_context_free(dkim_context_t *context) {
-	free(context->domain);
-	free(context->selector);
-	free(context->identity);
-	RSA_free(context->rsa_private);
-	free(context->skip_list);
-	free(context);
+void dkim_signer_free(dkim_signer_t *signer) {
+	free(signer->domain);
+	free(signer->selector);
+	free(signer->identity);
+	RSA_free(signer->rsa_private);
+	free(signer->skip_list);
+	free(signer);
 }
 
 /* create a DKIM-signature header value
    http://tools.ietf.org/html/rfc4871 */
-char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, char *body, int v) {
+char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *body, int v) {
 	int i = 0;
 	
 	/* relax canonicalization for headers */
 	if (v) printf (" * 'Relaxing' headers...\n");
-	stringpair **new_headers = relaxed_header_canon(context, headers, &headerc);
+	stringpair **new_headers = relaxed_header_canon(signer, headers, &headerc);
 	
 	/* relax canonicalization for body */
 	if (v) printf (" * 'Relaxing' body...\n");
@@ -133,14 +133,14 @@ char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, ch
 	char *dkim;
 	int dkim_len;
 	
-	if (context->identity) {
+	if (signer->identity) {
 		dkim_len = asprintf(&dkim, "v=1; a=rsa-sha256; s=%s; d=%s; t=%ld; i=%s; c=relaxed/relaxed; h=%s; bh=%s; b=",
-			context->selector, context->domain, ts, context->identity, header_list, bh
+			signer->selector, signer->domain, ts, signer->identity, header_list, bh
 		);
 	}
 	else {
 		dkim_len = asprintf(&dkim, "v=1; a=rsa-sha256; s=%s; d=%s; t=%ld; c=relaxed/relaxed; h=%s; bh=%s; b=",
-			context->selector, context->domain, ts, header_list, bh
+			signer->selector, signer->domain, ts, header_list, bh
 		);
 	}
 	
@@ -199,10 +199,10 @@ char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, ch
 	
 	/* sign canon headers with private key */
 	if (v) printf (" * Signing the header hash with the rsa key...\n");
-	unsigned char *sig = malloc(RSA_size(context->rsa_private));
+	unsigned char *sig = malloc(RSA_size(signer->rsa_private));
 	unsigned int sig_len;
 	
-	if (RSA_sign(NID_sha256, hash, SHA256_DIGEST_LENGTH, sig, &sig_len, context->rsa_private) == 0) {
+	if (RSA_sign(NID_sha256, hash, SHA256_DIGEST_LENGTH, sig, &sig_len, signer->rsa_private) == 0) {
 		printf (" * ERROR RSA_sign(): %s\n", ERR_error_string(ERR_get_error(), NULL));
 		free (hash);
 		free (new_headers);
@@ -251,7 +251,7 @@ char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, ch
 }
 
 /* The "relaxed" Header Canonicalization Algorithm */
-stringpair **relaxed_header_canon(dkim_context_t *context, stringpair **headers, int *headerc) {
+stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, int *headerc) {
 	int i = 0;
 	size_t e = 0;
 	

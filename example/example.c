@@ -59,8 +59,8 @@ int main(int argc, char *argv[]) {
 	char *body = "Hi.\r\n\r\nWe lost the game. Are you hungry yet?\r\n\r\nJoe.";
 	
 	/* create signature */
-	dkim_context_t *context = dkim_context_create(domain, selector, NULL, private_key, strlen(private_key));
-	char *dkim = dkim_create(context, headers, headerc, body, 0);
+	dkim_signer_t *signer = dkim_signer_create(domain, selector, NULL, private_key, strlen(private_key));
+	char *dkim = dkim_sign(signer, headers, headerc, body, 0);
 	printf ("Header: %s\n", dkim);
 
 	/* free some memory */
@@ -70,7 +70,7 @@ int main(int argc, char *argv[]) {
 		free (headers[i]);
 	}
 	free (headers);
-	dkim_context_free(context);
+	dkim_signer_free(context);
 
 	return 0;
 }

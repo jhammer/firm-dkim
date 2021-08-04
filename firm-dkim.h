@@ -42,11 +42,11 @@ typedef struct {
 	char *value;
 } stringpair;
 
-typedef struct dkim_context_t dkim_context_t;
+typedef struct dkim_signer_t dkim_signer_t;
 
-dkim_context_t *dkim_context_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len);
-void dkim_context_free(dkim_context_t *context);
+dkim_signer_t *dkim_signer_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len);
+void dkim_signer_free(dkim_signer_t *signer);
 
-char *dkim_create(dkim_context_t *context, stringpair **headers, int headerc, char *body, int v);
+char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *body, int v);
 
 #endif
