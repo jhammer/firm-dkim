@@ -31,7 +31,7 @@ THE SOFTWARE.
 
 stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, int *headerc);
 char *relaxed_body_canon(char *body);
-char *relaxed_body_canon_line(char *line);	
+char *relaxed_body_canon_line(char *line);
 
 char *rtrim_lines(char *str);
 char *rtrim(char *str);
@@ -223,15 +223,10 @@ char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *
 	dkim = realloc(dkim, dkim_len + sig_b64_len + 1);
 	memcpy (dkim + dkim_len, sig_b64, sig_b64_len + 1);
 	dkim_len += sig_b64_len;
-	
-	/* format header name */
-	char *formatted_dkim;
-	int formatted_dkim_len = asprintf(&formatted_dkim, "DKIM-Signature: %s", dkim);
-	free (dkim);
-	
+		
 	/* wrap dkim header */
 	if (v) printf (" * Wrapping the header...\n");
-	formatted_dkim = wrap(formatted_dkim, formatted_dkim_len);
+	dkim = wrap(dkim, dkim_len);
 	
 	/* free some more memory */
 	if (v) printf (" * Freeing some more memory...\n");
@@ -247,7 +242,7 @@ char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *
 		
 	/* return the dkim header value */
 	if (v) printf (" * Done, returning...\n");
-	return formatted_dkim;
+	return dkim;
 }
 
 /* The "relaxed" Header Canonicalization Algorithm */
@@ -313,13 +308,16 @@ stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, 
 	
 	for (i = 0; i < new_headerc; ++i) {
 		if (strlen(new_headers[i]->key) == 0) {
+			free(new_headers[i]->key);
+			free(new_headers[i]->value);
+			free(new_headers[i]);
 			continue;
 		}
 		
 		new_headers[j++] = new_headers[i];
 	}
 	
-	new_headerc = j;
+	*headerc = new_headerc = j;
 	
 	/* Unfold all header field continuation lines as described in
 	   [RFC2822]; in particular, lines with terminators embedded in
@@ -360,7 +358,7 @@ stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, 
 			if (e > 0) {
 				if (!(new_headers[i]->value[e-1] == ' ' && new_headers[i]->value[e] == ' ')) {
 					new_headers[i]->value[new_len++] = new_headers[i]->value[e];
-				} 
+				}
 			} else {
 				new_headers[i]->value[new_len++] = new_headers[i]->value[e];
 			}
@@ -370,7 +368,7 @@ stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, 
 	}
 	
 	/* Delete all WSP characters at the end of each unfolded header field
-		   value. */   
+		   value. */
 		/* Delete any WSP characters remaining before and after the colon
 	   separating the header field name from the header field value.  The
 	   colon separator MUST be retained. */
@@ -403,7 +401,7 @@ char *relaxed_body_canon(char *body) {
 				}
 			}
 			
-			char *line = malloc(i - offset + 1);	
+			char *line = malloc(i - offset + 1);
 			memcpy (line, body+offset, i-offset);
 			line[i-offset] = '\0';
 		
@@ -416,7 +414,7 @@ char *relaxed_body_canon(char *body) {
 			
 			if (is_r) {
 				i++;
-			}	
+			}
 			
 			offset = i+1;
 			free (line);
@@ -424,7 +422,7 @@ char *relaxed_body_canon(char *body) {
 	}
 
 	if (offset < body_len) {
-		char *line = malloc(i - offset + 1);	
+		char *line = malloc(i - offset + 1);
 		memcpy (line, body+offset, i-offset);
 		line[i-offset] = '\0';
 	
@@ -451,7 +449,7 @@ char *relaxed_body_canon(char *body) {
 	new_body[new_body_len++] = '\n';
 	new_body[new_body_len] = '\0';
 	
-	return new_body;	
+	return new_body;
 }
 
 
@@ -477,7 +475,7 @@ char *relaxed_body_canon_line(char *line) {
 		if (i > 0) {
 			if (!(line[i-1] == ' ' && line[i] == ' ')) {
 				line[new_len++] = line[i];
-			} 
+			}
 		} else {
 			line[new_len++] = line[i];
 		}
@@ -536,7 +534,7 @@ char *ltrim(char *str) {
 	char *start = str;
 	size_t len = strlen(str);
 
-	while (*start && len) {		
+	while (*start && len) {
 		if (*start == ' ' || *start == '\t') {
 			start++;
 		} else {
@@ -582,25 +580,25 @@ char *wrap(char *str, int len) {
 
 
 /* load an RSA key in PEM format from buff */
-int rsa_read_pem(RSA **rsa, char *buff, int len) { 
-	BIO *mem; 
+int rsa_read_pem(RSA **rsa, char *buff, int len) {
+	BIO *mem;
 
-	if ((mem = BIO_new_mem_buf(buff, len)) == NULL) { 
-		goto err; 
-	} 
+	if ((mem = BIO_new_mem_buf(buff, len)) == NULL) {
+		goto err;
+	}
 
-	*rsa = PEM_read_bio_RSAPrivateKey(mem, NULL, NULL, NULL); 
-	BIO_free (mem); 
+	*rsa = PEM_read_bio_RSAPrivateKey(mem, NULL, NULL, NULL);
+	BIO_free (mem);
 
-	if (*rsa == NULL) { 
-		goto err; 
-	} 
+	if (*rsa == NULL) {
+		goto err;
+	}
 
-	return 0; 
+	return 0;
 
-err: 
-	return -1; 
-} 
+err:
+	return -1;
+}
 
 
 /* Base64 encode algorithm using openssl */
@@ -630,7 +628,7 @@ char *base64_encode(const unsigned char *input, int length) {
 			buff[cur++] = buff[i];
 		}
 	}
-	buff[cur] = '\0';	
+	buff[cur] = '\0';
 
 	return buff;
 }
