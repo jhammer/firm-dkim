@@ -36,7 +36,6 @@ char *relaxed_body_canon_line(char *line);
 char *rtrim_lines(char *str);
 char *rtrim(char *str);
 char *ltrim(char *str);
-char *wrap(char *str, int len);
 int rsa_read_pem(RSA **rsa, char *buff, int len);
 char *base64_encode(const unsigned char *input, int length);
 
@@ -45,7 +44,7 @@ typedef struct dkim_signer_t {
 	char *selector;
 	char *identity;
 	RSA *rsa_private;
-	char *skip_list;
+	char *headers_to_sign;
 } dkim_signer_t;
 
 dkim_signer_t *dkim_signer_create(char *domain, char *selector, char *identity, char *pkey_buf, int pkey_len) {
@@ -69,10 +68,8 @@ dkim_signer_t *dkim_signer_create(char *domain, char *selector, char *identity, 
 	}
 	
 	/* see http://dkim.org/specs/rfc4871-dkimbase.html#choosing-header-fields */
-	char *default_skip_list = "return-path received comments keywords bcc resent-bcc dkim-signature";
-	signer->skip_list = malloc(strlen(default_skip_list) + 1);
-	strcpy(signer->skip_list, default_skip_list);
-
+	signer->headers_to_sign = strdup("from sender reply-to subject date message-id to cc mime-version content-type content-transfer-encoding content-id content-description resent-date resent-from resent-sender resent-to resent-cc resent-message-id in-reply-to references list-id list-help list-unsubscribe list-subscribe list-post list-owner list-archive");
+	
 	return signer;
 }
 
@@ -81,7 +78,7 @@ void dkim_signer_free(dkim_signer_t *signer) {
 	free(signer->selector);
 	free(signer->identity);
 	RSA_free(signer->rsa_private);
-	free(signer->skip_list);
+	free(signer->headers_to_sign);
 	free(signer);
 }
 
@@ -113,7 +110,7 @@ char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *
 	
 	/* create header list */
 	if (v) printf (" * Creating header list...\n");
-	int header_list_len = headerc - 1;
+	int header_list_len = 2 * (headerc - 1);
 	for (i = 0; i < headerc; ++i) {
 		header_list_len += strlen(new_headers[i]->key);
 	}
@@ -122,7 +119,7 @@ char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *
 	int header_list_start = 0;
 	for (i = 0; i < headerc; ++i) {
 		if (header_list_start) {
-			header_list_start += sprintf(header_list + header_list_start, ":");
+			header_list_start += sprintf(header_list + header_list_start, ": ");
 		}
 	
 		header_list_start += sprintf(header_list + header_list_start, "%s", new_headers[i]->key);
@@ -223,11 +220,7 @@ char *dkim_sign(dkim_signer_t *signer, stringpair **headers, int headerc, char *
 	dkim = realloc(dkim, dkim_len + sig_b64_len + 1);
 	memcpy (dkim + dkim_len, sig_b64, sig_b64_len + 1);
 	dkim_len += sig_b64_len;
-		
-	/* wrap dkim header */
-	if (v) printf (" * Wrapping the header...\n");
-	dkim = wrap(dkim, dkim_len);
-	
+			
 	/* free some more memory */
 	if (v) printf (" * Freeing some more memory...\n");
 	for (i = 0; i < headerc; ++i) {
@@ -276,18 +269,28 @@ stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, 
 		}
 	}
 	
-	/* Remove headers in our skip list */
-	char *brk;
-	char *token = strtok_r(context->skip_list, " ", &brk);
-	
-	while (token) {
+	/* Remove headers not in our allow list */
+	if (context->headers_to_sign) {
 		for (i = 0; i < new_headerc; ++i) {
-			if (strcmp(token, new_headers[i]->key) == 0) {
+			char *key = new_headers[i]->key;
+			int allowed = 0;
+			char *headers_to_sign = strdup(context->headers_to_sign);
+			char *to_free = headers_to_sign;
+			char *token;
+			
+			while ((token = strsep(&headers_to_sign, " "))) {
+				if (strcmp(token, key) == 0) {
+					allowed = 1;
+					break;
+				}
+			}
+			
+			free(to_free);
+			
+			if (!allowed) {
 				new_headers[i]->key[0] = '\0';
 			}
 		}
-		
-		token = strtok_r(NULL, " ", &brk);
 	}
 	
 	/* Remove all but last instance of duplicate headers */
@@ -329,7 +332,7 @@ stringpair **relaxed_header_canon(dkim_signer_t *context, stringpair **headers, 
 		int new_len = 0;
 
 		for (e = 0; e < val_len; ++e) {
-			if (e < val_len + 1) {
+			if (e < val_len - 1) {
 				if (!(new_headers[i]->value[e] == '\r' && new_headers[i]->value[e+1] == '\n')) {
 					new_headers[i]->value[new_len++] = new_headers[i]->value[e];
 				} else {
@@ -549,33 +552,6 @@ char *ltrim(char *str) {
 	free (str);
 	
 	return n;
-}
-
-
-/* very simple word wrap function for headers */
-char *wrap(char *str, int len) {
-	char *tmp = malloc(len*3+1);
-	int tmp_len = 0;
-	int i;
-	int lcount = 0;
-	
-	for (i = 0; i < len; ++i) {
-		if (str[i] == ' ' || lcount == 75) {
-			tmp[tmp_len++] = str[i];
-			tmp[tmp_len++] = '\r';
-			tmp[tmp_len++] = '\n';
-			tmp[tmp_len++] = '\t';
-			lcount = 0;
-		} else {
-			tmp[tmp_len++] = str[i];
-			++lcount;
-		}
-	}
-	
-	tmp[tmp_len] = '\0';
-	free (str);
-	
-	return tmp;
 }
 
 
